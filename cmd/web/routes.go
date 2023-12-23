@@ -17,11 +17,18 @@ func routes() http.Handler {
 	mux.Use(NoSurf)
 	mux.Use(CheckRemember)
 
+
 	// login
 	mux.Get("/", handlers.Repo.LoginScreen)
 	mux.Post("/", handlers.Repo.Login)
 
 	mux.Get("/user/logout", handlers.Repo.Logout)
+
+	// our pusher routes
+	mux.Route("/pusher", func(mux chi.Router) {
+		mux.Use(Auth)
+		mux.Post("/auth", handlers.Repo.PusherAuth)
+	})
 
 	// admin routes
 	mux.Route("/admin", func(mux chi.Router) {
