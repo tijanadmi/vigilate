@@ -34,3 +34,12 @@ func (repo *DBRepo) PusherAuth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(response)
 }
+
+func (repo *DBRepo) TestPusher(w http.ResponseWriter, r *http.Request) {
+	data := make(map[string]string)
+	data["message"] = "Hello, world"
+	err := repo.App.WsClient.Trigger("public-channel", "test-event", data) // prvi argument ime kanala, drugi argument ime event-a, treci argument su podaci koji se prosledjuju
+	if err != nil {
+		log.Println(err)
+	}
+}
