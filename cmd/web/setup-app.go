@@ -150,9 +150,8 @@ func setupApp() (*string, error) {
 	))
 
 	app.Scheduler = scheduler
-	app.Scheduler=scheduler
-	app.Scheduler.Start()
-	startMonitoring()
+
+	go handlers.Repo.StartMonitoring()
 
 	//go handlers.Repo.StartMonitoring()
 
