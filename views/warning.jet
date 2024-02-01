@@ -25,18 +25,18 @@
     <div class="row">
         <div class="col">
 
-            <table class="table table-condensed table-striped">
+            <table id="warning-table" class="table table-condensed table-striped">
                 <thead>
                 <tr>
                     <th>Host</th>
                     <th>Service</th>
-                    <th>Status</th>
                     <th>Message</th>
                 </tr>
                 </thead>
                 <tbody>
                 {{if len(services) > 0}}
                     {{ range services }}
+                    <tr id="host-service-{{.ID}}">
                         <tr>
                             <td>
                                 <a href="/admin/host/{{.HostID}}#warning-content">
@@ -44,15 +44,12 @@
                                 </a>
                             </td>
                             <td>{{.Service.ServiceName}}</td>
-                            <td>
-                                <span class="badge bg-secondary-dark">{{.Status}}</span>
-                            </td>
-                            <td></td>
+                            <td>{{.LastMessage}}</td>
                         </tr>
                     {{end}}
                 {{else}}
                     <tr>
-                        <td colspan="4">No services</td>
+                        <td colspan="3">No services</td>
                     </tr>
                 {{end}}
                 </tbody>
