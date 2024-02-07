@@ -134,11 +134,15 @@ func setupApp() (*string, error) {
 		Secure: *pusherSecure,
 		Host:   fmt.Sprintf("%s:%s", *pusherHost, *pusherPort),
 	}
+	
+
+	
 
 	log.Println("Host", fmt.Sprintf("%s:%s", *pusherHost, *pusherPort))
 	log.Println("Secure", *pusherSecure)
 
-	app.WsClient = wsClient
+	//app.WsClient = wsClient
+	app.WsClient = &wsClient
 
 	monitorMap := make(map[int]cron.EntryID)
 	app.MonitorMap = monitorMap
