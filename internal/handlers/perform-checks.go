@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -10,7 +11,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/tijanadmi/vigilate/internal/certificateutils"
+	"github.com/tijanadmi/vigilate/internal/channeldata"
+	"github.com/tijanadmi/vigilate/internal/helpers"
 	"github.com/tijanadmi/vigilate/internal/models"
+	"github.com/tijanadmi/vigilate/internal/sms"
 )
 
 const (
@@ -66,7 +71,7 @@ func (repo *DBRepo) ScheduledCheck(hostServiceID int) {
 func (repo *DBRepo) updateHostServiceStatusCount(h models.Host, hs models.HostService, newStatus, msg string) {
 	// update host service record in db with status and last check
 	hs.Status = newStatus
-	//hs.LastMessage = msg
+	hs.LastMessage = msg
 	hs.LastCheck = time.Now()
 	err := repo.DB.UpdateHostService(hs)
 	if err != nil {
@@ -119,8 +124,30 @@ func (repo *DBRepo) TestCheck(w http.ResponseWriter, r *http.Request) {
 	// test the service
 	newStatus, msg := repo.testServiceForHost(h, hs)
 
+	// save event
+	event := models.Event{
+		EventType:     newStatus,
+		HostServiceID: hs.ID,
+		HostID:        h.ID,
+		ServiceName:   hs.Service.ServiceName,
+		HostName:      hs.HostName,
+		Message:       msg,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	err = repo.DB.InsertEvent(event)
+	if err != nil {
+		log.Println(err)
+	}
+
+	// broadcast service status changed event
+	if newStatus != hs.Status {
+		repo.pushStatusChangedEvent(h, hs, newStatus)
+	}
+
 	// update the host service in the database with status (if changed) and last check
 	hs.Status = newStatus
+	hs.LastMessage=msg
 	hs.LastCheck = time.Now()
 	hs.UpdatedAt = time.Now()
 
@@ -130,7 +157,7 @@ func (repo *DBRepo) TestCheck(w http.ResponseWriter, r *http.Request) {
 		okay = false
 	}
 
-	// broadcast service status changed event
+
 
 	var resp jsonResp
 
@@ -165,6 +192,14 @@ func (repo *DBRepo) testServiceForHost(h models.Host, hs models.HostService) (st
 	case HTTP:
 		msg, newStatus = testHTTPForHost(h.URL)
 		break
+
+	case HTTPS:
+		msg, newStatus = testHTTPSForHost(h.URL)
+		break
+
+	case SSLCertificate:
+		msg, newStatus = testSSLForHost(h.URL)
+		break
 	}
 
 	// broadcast to clients if appropriate
@@ -173,7 +208,7 @@ func (repo *DBRepo) testServiceForHost(h models.Host, hs models.HostService) (st
 		repo.pushStatusChangedEvent(h, hs, newStatus)
 		log.Println("Updating host services to last message", msg)
 		// save event
-		/*event := models.Event{
+		event := models.Event{
 			EventType:     newStatus,
 			HostServiceID: hs.ID,
 			HostID:        h.ID,
@@ -186,10 +221,10 @@ func (repo *DBRepo) testServiceForHost(h models.Host, hs models.HostService) (st
 		err := repo.DB.InsertEvent(event)
 		if err != nil {
 			log.Println(err)
-		}*/
+		}
 
 		// send email if appropriate
-		/*if repo.App.PreferenceMap["notify_via_email"] == "1" {
+		if repo.App.PreferenceMap["notify_via_email"] == "1" {
 			if hs.Status != "pending" {
 				mm := channeldata.MailData{
 					ToName:    repo.App.PreferenceMap["notify_name"],
@@ -211,10 +246,10 @@ func (repo *DBRepo) testServiceForHost(h models.Host, hs models.HostService) (st
 				helpers.SendEmail(mm)
 
 			}
-		}*/
+		}
 
 		// send sms if appropriate
-		/*if repo.App.PreferenceMap["notify_via_sms"] == "1" {
+		if repo.App.PreferenceMap["notify_via_sms"] == "1" {
 			to := repo.App.PreferenceMap["sms_notify_number"]
 			smsMessage := ""
 
@@ -230,11 +265,11 @@ func (repo *DBRepo) testServiceForHost(h models.Host, hs models.HostService) (st
 			if err != nil {
 				log.Println("Error sending sms in peform-checks.go", err)
 			}
-		}*/
+		}
 
 	}
 
-	//repo.pushScheduleChangedEvent(hs, newStatus)
+	repo.pushScheduleChangedEvent(hs, newStatus)
 
 	return newStatus, msg
 }
@@ -298,3 +333,126 @@ func testHTTPForHost(url string) (string, string) {
 
 	return fmt.Sprintf("%s - %s", url, resp.Status), "healthy"
 }
+
+// testHTTPSForHost tests HTTPS service
+func testHTTPSForHost(url string) (string, string) {
+	log.Println("Testing HTTPS")
+	if strings.HasSuffix(url, "/") {
+		url = strings.TrimSuffix(url, "/")
+	}
+
+	url = strings.Replace(url, "http://", "https://", -1)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Println("HTTPS error 1")
+		return fmt.Sprintf("%s - %s", url, "error connecting"), "problem"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Println("HTTPS error 2", resp.StatusCode)
+		return fmt.Sprintf("%s - %s", url, resp.Status), "problem"
+	}
+
+	return fmt.Sprintf("%s - %s", url, resp.Status), "healthy"
+}
+
+// scanHost gets cert details from an internet host
+func scanHost(hostname string, certDetailsChannel chan certificateutils.CertificateDetails, errorsChannel chan error) {
+	res, err := certificateutils.GetCertificateDetails(hostname, 10)
+	if err != nil {
+		errorsChannel <- err
+	} else {
+		certDetailsChannel <- res
+	}
+}
+
+// testSSLForHost tests an ssl certificate for a host
+func testSSLForHost(url string) (string, string) {
+	if strings.HasPrefix(url, "https://") {
+		url = strings.Replace(url, "https://", "", -1)
+	}
+	if strings.HasPrefix(url, "http://") {
+		url = strings.Replace(url, "http://", "", -1)
+	}
+	var certDetailsChannel chan certificateutils.CertificateDetails
+	var errorsChannel chan error
+	certDetailsChannel = make(chan certificateutils.CertificateDetails, 1)
+	errorsChannel = make(chan error, 1)
+
+	var msg string
+	var newStatus string
+
+	scanHost(url, certDetailsChannel, errorsChannel)
+
+	for i, certDetailsInQueue := 0, len(certDetailsChannel); i < certDetailsInQueue; i++ {
+		certDetails := <-certDetailsChannel
+		certificateutils.CheckExpirationStatus(&certDetails, 30)
+
+		if certDetails.Expired {
+			// cert expired
+			msg = certDetails.Hostname + " has expired!"
+
+		} else if certDetails.ExpiringSoon {
+			// cert expiring sono
+			if certDetails.DaysUntilExpiration < 7 {
+				msg = certDetails.Hostname + " expiring in " + strconv.Itoa(certDetails.DaysUntilExpiration) + " days"
+				newStatus = "problem"
+			} else {
+				msg = certDetails.Hostname + " expiring in " + strconv.Itoa(certDetails.DaysUntilExpiration) + " days"
+				newStatus = "warning"
+			}
+		} else {
+			// cert okay
+			msg = certDetails.Hostname + " expiring in " + strconv.Itoa(certDetails.DaysUntilExpiration) + " days"
+			newStatus = "healthy"
+		}
+	}
+
+	if len(errorsChannel) > 0 {
+		fmt.Printf("There were %d error(s):\n", len(errorsChannel))
+		for i, errorsInChannel := 0, len(errorsChannel); i < errorsInChannel; i++ {
+			msg = fmt.Sprintf("%s\n", <-errorsChannel)
+		}
+		fmt.Printf("\n")
+		newStatus = "problem"
+	}
+
+	return msg, newStatus
+}
+
+func (repo *DBRepo) addToMonitorMap(hs models.HostService) {
+	if repo.App.PreferenceMap["monitoring_live"] == "1" {
+		var j job
+		j.HostServiceID = hs.ID
+		scheduleID, err := repo.App.Scheduler.AddJob(fmt.Sprintf("@every %d%s", hs.ScheduleNumber, hs.ScheduleUnit), j)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		repo.App.MonitorMap[hs.ID] = scheduleID
+		data := make(map[string]string)
+		data["message"] = "scheduling"
+		data["host_service_id"] = strconv.Itoa(hs.ID)
+		data["next_run"] = "Pending..."
+		data["service"] = hs.Service.ServiceName
+		data["host"] = hs.HostName
+		data["last_run"] = hs.LastCheck.Format("2006-01-02 3:04:05 PM")
+		data["schedule"] = fmt.Sprintf("@every %d%s", hs.ScheduleNumber, hs.ScheduleUnit)
+
+		repo.broadcastMessage("public-channel", "schedule-changed-event", data)
+	}
+}
+
+func (repo *DBRepo) removeFromMonitorMap(hs models.HostService) {
+	if repo.App.PreferenceMap["monitoring_live"] == "1" {
+		repo.App.Scheduler.Remove(repo.App.MonitorMap[hs.ID])
+		data := make(map[string]string)
+		data["host_service_id"] = strconv.Itoa(hs.ID)
+		repo.broadcastMessage("public-channel", "schedule-item-removed-event", data)
+
+	}
+}
+
